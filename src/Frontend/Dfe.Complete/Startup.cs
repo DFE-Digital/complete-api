@@ -4,6 +4,7 @@ using Dfe.Complete.Configuration;
 using Dfe.Complete.Security;
 using Dfe.Complete.Services;
 using Dfe.Complete.StartupConfiguration;
+using DfE.CoreLibs.Security.Authorization;
 using GovUk.Frontend.AspNetCore;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
@@ -71,8 +72,8 @@ public class Startup
         });
         services.AddHttpContextAccessor();
 
-        services.AddAuthorization(options => { options.DefaultPolicy = SetupAuthorizationPolicyBuilder().Build(); });
-
+        services.AddApplicationAuthorization(Configuration);
+        
         services.AddMicrosoftIdentityWebAppAuthentication(Configuration);
         ConfigureCookies(services);
 
@@ -89,7 +90,6 @@ public class Startup
         services.AddGovUkFrontend();
 
         // New API client
-        //services.AddCompleteApiClient<ICreateProjectClient, CreateProjectClient>(Configuration);
 
         services.AddApplicationDependencyGroup(Configuration);
         services.AddInfrastructureDependencyGroup(Configuration);
@@ -132,8 +132,6 @@ public class Startup
         app.UseEndpoints(endpoints =>
         {
             endpoints.MapRazorPages();
-            // endpoints.MapControllerRoute("default", "{controller}/{action}/");
-            // endpoints.MapControllers();
         });
     }
 
@@ -157,14 +155,6 @@ public class Startup
 
     private void RegisterClients(IServiceCollection services)
     {
-        //TODO: AcademiesOptions is from Api proj, need to move or remove
-        // services.AddHttpClient("AcademiesClient", (_, client) =>
-        // {
-        //     AcademiesOptions academiesOptions = GetTypedConfigurationFor<AcademiesOptions>();
-        //     client.BaseAddress = new Uri(academiesOptions.ApiEndpoint);
-        //     client.DefaultRequestHeaders.Add("ApiKey", academiesOptions.ApiKey);
-        // });
-
         services.AddHttpClient("CompleteClient", (_, client) =>
         {
             CompleteOptions completeOptions = GetTypedConfigurationFor<CompleteOptions>();
