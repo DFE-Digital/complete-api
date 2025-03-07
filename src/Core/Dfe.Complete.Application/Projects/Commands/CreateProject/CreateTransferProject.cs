@@ -1,3 +1,7 @@
+using Dfe.AcademiesApi.Client;
+using Dfe.AcademiesApi.Client.Contracts;
+using Dfe.Complete.Application.Projects.Models;
+using Dfe.Complete.Application.Projects.Queries.GetLocalAuthority;
 using MediatR;
 using Dfe.Complete.Domain.ValueObjects;
 using Dfe.Complete.Domain.Enums;
@@ -31,45 +35,51 @@ namespace Dfe.Complete.Application.Projects.Commands.CreateProject
 
     public class CreateTransferProjectCommandHandler(
         ICompleteRepository<Project> projectRepository,
-        ICompleteRepository<TransferTasksData> transferTaskRepository,  
+        ICompleteRepository<TransferTasksData> transferTaskRepository,
+        IEstablishmentsV4Client establishmentsClient,
         ISender sender)
         : IRequestHandler<CreateTransferProjectCommand, ProjectId>
     {
         public async Task<ProjectId> Handle(CreateTransferProjectCommand request, CancellationToken cancellationToken)
         {
-            var userRequest = await sender.Send(new GetUserByAdIdQuery(request.UserAdId));
+            var localAuthorityIdRequest = await sender.Send(new GetLocalAuthorityBySchoolUrnQuery(request.Urn.Value),
+                cancellationToken);
 
-            if (!userRequest.IsSuccess)
-            {
-                throw new Exception($"User retrieval failed: {userRequest.Error}");
-            }
+            if (!localAuthorityIdRequest.IsSuccess || localAuthorityIdRequest.Value?.LocalAuthorityId == null)
+                throw new NotFoundException(
+                    $"No Local authority could be found via Establishments for School Urn: {request.Urn.Value}.",
+                     nameof(request.Urn),
+                    innerException: new Exception(localAuthorityIdRequest.Error));
 
-            var projectUser = userRequest.Value;
-
-            var projectUserTeam = projectUser?.Team;
-            var projectUserId = projectUser?.Id; 
-
-            var projectTeam = EnumExtensions.FromDescription<ProjectTeam>(projectUserTeam);
-            var region = EnumMapper.MapTeamToRegion(projectTeam);
+            var region = (await establishmentsClient.GetEstablishmentByUrnAsync(request.Urn.Value.ToString(),
+                cancellationToken)).Gor?.Code?.ToEnumFromChar<Region>();
 
             var createdAt = DateTime.UtcNow;
             var transferTaskId = Guid.NewGuid();
             var projectId = new ProjectId(Guid.NewGuid());
 
-            var transferTask = new TransferTasksData(new TaskDataId(transferTaskId), createdAt, createdAt, request.IsDueToInedaquateOfstedRating, request.IsDueToIssues, request.OutGoingTrustWillClose);
+            var transferTask = new TransferTasksData(new TaskDataId(transferTaskId), createdAt, createdAt,
+                request.IsDueToInedaquateOfstedRating, request.IsDueToIssues, request.OutGoingTrustWillClose);
 
-            var projectRequest = await sender.Send(new GetProjectGroupByGroupReferenceNumberQuery(request.GroupReferenceNumber));
+            var projectRequest =
+                await sender.Send(new GetProjectGroupByGroupReferenceNumberQuery(request.GroupReferenceNumber),
+                    cancellationToken);
 
             if (!projectRequest.IsSuccess)
-            {
-                throw new Exception($"Project Group retrieval failed: {projectRequest.Error}");
-            }
+                throw new NotFoundException($"Project Group retrieval failed",
+                    nameof(request.GroupReferenceNumber), new Exception(projectRequest.Error));
+
+            if (projectRequest.Value == null)
+                throw new NotFoundException(
+                    $"No Project Group found with reference number: {request.GroupReferenceNumber}",
+                    nameof(request.GroupReferenceNumber));
 
             var groupId = projectRequest.Value?.Id;
 
             ProjectTeam team;
             DateTime? assignedAt = null;
             UserId? projectUserAssignedToId = null;
+            UserDto? projectUser = null;
 
             if (request.HandingOverToRegionalCaseworkService)
             {
@@ -77,43 +87,56 @@ namespace Dfe.Complete.Application.Projects.Commands.CreateProject
             }
             else
             {
+                if (request.UserAdId is null)
+                    throw new ArgumentException(
+                        "Project cannot be unassigned if it is not being handed over to Regional Case Worker Services");
+                var userRequest = await sender.Send(new GetUserByAdIdQuery(request.UserAdId), cancellationToken);
+
+                if (!userRequest.IsSuccess)
+                    throw new NotFoundException("No user found.", innerException: new Exception(userRequest.Error));
+                projectUser = userRequest.Value ?? throw new NotFoundException("No user found.");
+
+                var projectUserTeam = projectUser.Team;
+                var projectUserId = projectUser.Id;
+
+                var projectTeam = projectUserTeam.FromDescription<ProjectTeam>();
                 team = projectTeam;
                 assignedAt = DateTime.UtcNow;
                 projectUserAssignedToId = projectUserId;
             }
 
             var project = Project.CreateTransferProject
-                (projectId,
-                    request.Urn,
-                    createdAt,
-                    createdAt,
-                    TaskType.Transfer,
-                    ProjectType.Transfer,
-                    transferTaskId,
-                    region,
-                    team,
-                    projectUser?.Id,
-                    projectUserAssignedToId,
-                    assignedAt,
-                    request.IncomingTrustUkprn,
-                    request.OutgoingTrustUkprn,
-                    groupId,
-                    request.EstablishmentSharepointLink,
-                    request.IncomingTrustSharepointLink,
-                    request.OutgoingTrustSharepointLink,
-                    request.AdvisoryBoardDate,
-                    request.AdvisoryBoardConditions,
-                    request.SignificantDate,
-                    request.IsSignificantDateProvisional,
-                    request.IsDueTo2Ri, 
-                    request.HandoverComments
-                ); 
-            
+            (projectId,
+                request.Urn,
+                createdAt,
+                createdAt,
+                TaskType.Transfer,
+                ProjectType.Transfer,
+                transferTaskId,
+                region,
+                team,
+                projectUser?.Id,
+                projectUserAssignedToId,
+                assignedAt,
+                request.IncomingTrustUkprn,
+                request.OutgoingTrustUkprn,
+                groupId,
+                request.EstablishmentSharepointLink,
+                request.IncomingTrustSharepointLink,
+                request.OutgoingTrustSharepointLink,
+                request.AdvisoryBoardDate,
+                request.AdvisoryBoardConditions,
+                request.SignificantDate,
+                request.IsSignificantDateProvisional,
+                request.IsDueTo2Ri,
+                request.HandoverComments,
+                localAuthorityIdRequest.Value.LocalAuthorityId.Value
+            );
+
             await transferTaskRepository.AddAsync(transferTask, cancellationToken);
             await projectRepository.AddAsync(project, cancellationToken);
 
             return project.Id;
         }
-        
     }
 }
