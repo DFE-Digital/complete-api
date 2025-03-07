@@ -48,7 +48,7 @@ class NewProjectPage {
     }
 
     public continue(): this {
-        cy.getByClass("govuk-button").click();
+        cy.get('[data-cy="continue-button"]').click();
         return this;
     }
 
