@@ -1,5 +1,5 @@
-using Dfe.Complete.Application.Common.Models;
 using Dfe.Complete.Application.Projects.Models;
+using Dfe.AcademiesApi.Client.Contracts;
 using Dfe.Complete.Application.Projects.Queries.GetLocalAuthority;
 using MediatR;
 using Dfe.Complete.Domain.ValueObjects;
@@ -31,6 +31,7 @@ namespace Dfe.Complete.Application.Projects.Commands.CreateProject
     public class CreateConversionProjectCommandHandler(
         ICompleteRepository<Project> projectRepository,
         ICompleteRepository<ConversionTasksData> conversionTaskRepository,
+        IEstablishmentsV4Client establishmentsClient,
         ISender sender)
         : IRequestHandler<CreateConversionProjectCommand, ProjectId>
     {
@@ -40,24 +41,20 @@ namespace Dfe.Complete.Application.Projects.Commands.CreateProject
                 cancellationToken);
 
             if (!localAuthorityIdRequest.IsSuccess || localAuthorityIdRequest.Value?.LocalAuthorityId == null)
-                throw new NotFoundException($"No Local authority could be found via Establishments for School Urn: {request.Urn.Value}.", nameof(request.Urn), innerException: new Exception(localAuthorityIdRequest.Error));
-            
-            // The user Team should be moved as a Claim or Group to the Entra (MS AD)
-            Result<UserDto?>? userRequest = null;
-            
-            if (!string.IsNullOrEmpty(request.UserAdId))
-                userRequest = await sender.Send(new GetUserByAdIdQuery(request.UserAdId), cancellationToken);
+                throw new NotFoundException(
+                    $"No Local authority could be found via Establishments for School Urn: {request.Urn.Value}.",
+                    nameof(request.Urn), innerException: new Exception(localAuthorityIdRequest.Error));
 
-            if (userRequest is not { IsSuccess: true })
-                throw new NotFoundException("No user found.", innerException: new Exception(userRequest?.Error));
-            
-            var projectUser = userRequest.Value;
-
-            var projectUserTeam = projectUser?.Team;
-            var projectUserId = projectUser?.Id;
-
-            var projectTeam = projectUserTeam.FromDescription<ProjectTeam>();
-            var region = EnumMapper.MapTeamToRegion(projectTeam);
+            Region? region;
+            try
+            {
+                region = (await establishmentsClient.GetEstablishmentByUrnAsync(request.Urn.Value.ToString(),
+                    cancellationToken)).Gor?.Code?.ToEnumFromChar<Region>();
+            }
+            catch (AcademiesApiException e)
+            {
+                throw new NotFoundException("Problem fetching the establishment", e);
+            }
 
             var createdAt = DateTime.UtcNow;
             var conversionTaskId = Guid.NewGuid();
@@ -77,10 +74,11 @@ namespace Dfe.Complete.Application.Projects.Commands.CreateProject
 
                 projectGroupDto = projectGroupRequest.Value ?? throw new NotFoundException($"No Project Group found with reference number: {request.GroupReferenceNumber}", nameof(request.GroupReferenceNumber));
             }
-            
+
             ProjectTeam team;
             DateTime? assignedAt = null;
             UserId? projectUserAssignedToId = null;
+            UserDto? projectUser = null;
 
             if (request.HandingOverToRegionalCaseworkService)
             {
@@ -88,7 +86,20 @@ namespace Dfe.Complete.Application.Projects.Commands.CreateProject
             }
             else
             {
-                team = projectTeam;
+                if (request.UserAdId is null)
+                    throw new ArgumentException(
+                        "Project cannot be unassigned if it is not being handed over to Regional Case Worker Services");
+                // The user Team should be moved as a Claim or Group to the Entra (MS AD)
+                var userRequest = await sender.Send(new GetUserByAdIdQuery(request.UserAdId), cancellationToken);
+
+                if (!userRequest.IsSuccess)
+                    throw new NotFoundException("No user found.", innerException: new Exception(userRequest.Error));
+                projectUser = userRequest.Value ?? throw new NotFoundException("No user found.");
+
+                var projectUserTeam = projectUser.Team;
+                var projectUserId = projectUser.Id;
+
+                team = projectUserTeam.FromDescription<ProjectTeam>();
                 assignedAt = DateTime.UtcNow;
                 projectUserAssignedToId = projectUserId;
             }
@@ -116,7 +127,7 @@ namespace Dfe.Complete.Application.Projects.Commands.CreateProject
                 projectUser?.Id,
                 projectUserAssignedToId,
                 assignedAt,
-                request.HandoverComments, 
+                request.HandoverComments,
                 localAuthorityIdRequest.Value.LocalAuthorityId.Value);
 
             await conversionTaskRepository.AddAsync(conversionTask, cancellationToken);
